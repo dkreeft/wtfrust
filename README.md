@@ -14,13 +14,20 @@ This collection explains those results with small, reproducible examples. It is 
 - [Usage](#usage)
 - [👀 Examples](#-examples)
   - [Section: Ownership and bindings](#section-ownership-and-bindings)
-    - [An underscore makes all the difference](#an-underscore-makes-all-the-difference)
-    - [Shadowing is not dropping](#shadowing-is-not-dropping)
+    - [An underscore makes all the difference](#-an-underscore-makes-all-the-difference)
+    - [Shadowing is not dropping](#-shadowing-is-not-dropping)
   - [Section: Collections and evaluation](#section-collections-and-evaluation)
-    - [One expression, three shared handles](#one-expression-three-shared-handles)
-    - [Zero elements, one side effect](#zero-elements-one-side-effect)
+    - [One expression, three shared handles](#-one-expression-three-shared-handles)
+    - [Zero elements, one side effect](#-zero-elements-one-side-effect)
   - [Section: Hidden details](#section-hidden-details)
-    - [The constant that forgets its changes](#the-constant-that-forgets-its-changes)
+    - [The constant that forgets its changes](#-the-constant-that-forgets-its-changes)
+    - [The dead branch that won't compile](#-the-dead-branch-that-wont-compile)
+  - [Section: Methods and types](#section-methods-and-types)
+    - [The method that wasn't called](#-the-method-that-wasnt-called)
+    - [Two identical-looking, incompatible types](#-two-identical-looking-incompatible-types)
+  - [Section: Closures and captures](#section-closures-and-captures)
+    - [A closure that moves only half](#-a-closure-that-moves-only-half)
+    - [Moving once, calling twice](#-moving-once-calling-twice)
 - [Run the examples](#run-the-examples)
 - [Contributing](#contributing)
 - [🎓 License](#-license)
@@ -267,7 +274,276 @@ fn main() {
 - [Rust Reference — constant items](https://doc.rust-lang.org/reference/items/constant-items.html)
 - [The rustc book — CONST_ITEM_INTERIOR_MUTATIONS](https://doc.rust-lang.org/rustc/lints/listing/warn-by-default.html#const-item-interior-mutations)
 
+### ▶ The dead branch that won't compile
+
+```rust
+fn main() {
+    if cfg!(any()) {
+        nonexistent_function();
+    }
+
+    println!("Hello");
+}
+```
+
+**Compiler result:**
+
+```text
+error[E0425]
+```
+
+The condition `cfg!(any())` is always `false`, so the branch can never execute. Nevertheless, the program fails to compile.
+
+By contrast, this program compiles successfully:
+
+```rust
+#[cfg(any())]
+fn unused() {
+    nonexistent_function();
+}
+
+fn main() {
+    println!("Hello");
+}
+```
+
+**Output:**
+
+```text
+Hello
+```
+
+#### 💡 Explanation:
+
+Rust provides two similar-looking conditional compilation mechanisms with fundamentally different behavior:
+
+- **`cfg!(...)` is a macro** that evaluates a configuration predicate and produces a boolean. It does not remove code.
+- **`#[cfg(...)]` is an attribute** that conditionally includes or excludes code during compilation.
+
+Although `cfg!(any())` always evaluates to `false`, the compiler still resolves names and type-checks the contents of the unreachable branch.
+
+Conversely, `#[cfg(any())]` removes the annotated function before type checking, so the reference to `nonexistent_function()` causes no error.
+
+**Sources:**
+- [`examples/compile_fail/cfg_does_not_remove_code.rs`](examples/compile_fail/cfg_does_not_remove_code.rs)
+
+**References:**
+- [`cfg!` macro](https://doc.rust-lang.org/std/macro.cfg.html)
+- [`cfg` attribute](https://doc.rust-lang.org/reference/conditional-compilation.html)
+
 ---
+
+## Section: Methods and types
+
+### ▶ The method that wasn't called
+
+```rust
+struct Device;
+
+trait Run {
+    fn run(&self);
+}
+
+impl Device {
+    fn run(&mut self) {
+        println!("inherent");
+    }
+}
+
+impl Run for Device {
+    fn run(&self) {
+        println!("trait");
+    }
+}
+
+fn main() {
+    let mut device = Device;
+    device.run();
+    Device::run(&mut device);
+}
+```
+
+**Output:**
+
+```text
+trait
+inherent
+```
+
+#### 💡 Explanation:
+
+Rust searches receiver types in order, considering `Device`, then `&Device`, then `&mut Device`.
+
+The trait method accepts `&self`, so it is found before the inherent method requiring `&mut self`. Consequently, `device.run()` calls the trait implementation, even though `Device` has an inherent method with the same name.
+
+The explicit call `Device::run(&mut device)` selects the inherent method.
+
+**Sources:**
+- [`examples/method_resolution_surprise.rs`](examples/method_resolution_surprise.rs)
+
+**References:**
+- [Rust Reference — Method-call expressions](https://doc.rust-lang.org/reference/expressions/method-call-expr.html)
+
+### ▶ Two identical-looking, incompatible types
+
+```rust
+fn first() -> impl Iterator<Item = u8> {
+    0..3
+}
+
+fn second() -> impl Iterator<Item = u8> {
+    0..3
+}
+
+fn main() {
+    let _iterators = vec![first(), second()];
+}
+```
+
+**Compiler result:**
+
+```text
+error[E0308]
+```
+
+Both functions return the same concrete type, `Range<u8>`, and expose the same return signature. Yet their results cannot be stored in the same vector.
+
+#### 💡 Explanation:
+
+Return-position `impl Trait` introduces an opaque type whose concrete implementation is hidden from callers.
+
+Each function declares its own distinct opaque return type, even if both happen to use the same underlying concrete type.
+
+Therefore, although both `first()` and `second()` return `Range<u8>` internally, their opaque return types are distinct from the caller's perspective.
+
+The `vec!` macro requires elements to have a common concrete type, resulting in a type mismatch.
+
+If the functions instead explicitly returned `std::ops::Range<u8>`, the vector would compile:
+
+```rust
+fn first() -> std::ops::Range<u8> {
+    0..3
+}
+
+fn second() -> std::ops::Range<u8> {
+    0..3
+}
+
+fn main() {
+    let _iterators = vec![first(), second()];
+}
+```
+
+The important distinction is that `impl Trait` does not mean "any type implementing this trait." It represents a specific opaque type chosen by the function defining it.
+
+**Sources:**
+- [`examples/compile_fail/distinct_opaque_return_types.rs`](examples/compile_fail/distinct_opaque_return_types.rs)
+
+**References:**
+- [Rust Reference — impl Trait](https://doc.rust-lang.org/reference/types/impl-trait.html)
+
+## Section: Closures and captures
+
+### ▶ A closure that moves only half
+
+```rust
+struct Message {
+    subject: String,
+    body: String,
+}
+
+fn main() {
+    let message = Message {
+        subject: String::from("Hello"),
+        body: String::from("World"),
+    };
+
+    let print_subject = move || {
+        println!("{}", message.subject);
+    };
+
+    println!("{}", message.body);
+    print_subject();
+}
+```
+
+**Output:**
+
+```text
+World
+Hello
+```
+
+#### 💡 Explanation:
+
+In Rust 2021 and later, closures can capture individual struct fields rather than entire variables.
+
+Although the closure uses `move`, it only captures `message.subject`, not the entire `message` struct.
+
+Both fields contain `String` values, which do not implement `Copy`. Nevertheless, `message.body` remains accessible after the closure is created.
+
+This behavior is known as *disjoint field capture* or *precise closure capture*.
+
+There are exceptions to this capture precision, including certain types implementing `Drop`.
+
+**Sources:**
+- [`examples/partial_closure_capture.rs`](examples/partial_closure_capture.rs)
+
+**References:**
+- [Rust Edition Guide — Disjoint capture in closures](https://doc.rust-lang.org/edition-guide/rust-2021/disjoint-capture-in-closures.html)
+
+### ▶ Moving once, calling twice
+
+```rust
+fn call_twice(greet: impl Fn(&str)) {
+    greet("Alice");
+    greet("Bob");
+}
+
+fn main() {
+    let prefix = String::from("Hello");
+    let greet = move |name: &str| {
+        println!("{prefix}, {name}");
+    };
+
+    call_twice(greet);
+}
+```
+
+**Output:**
+
+```text
+Hello, Alice
+Hello, Bob
+```
+
+Despite explicitly capturing ownership of `prefix` with `move`, the closure satisfies the `Fn` trait and can be called multiple times.
+
+#### 💡 Explanation:
+
+The `move` keyword determines how a closure captures variables from its environment. It does not determine how many times the closure can be called.
+
+In this example:
+
+- The closure takes ownership of `prefix`, since it is a `String` and does not implement `Copy`.
+- Each invocation merely borrows `prefix` to format the output.
+- The closure therefore implements `Fn`, allowing it to be called repeatedly.
+
+The closure's call traits depend on what its body does with captured values:
+
+- `Fn`: Does not mutate or move out of captured values.
+- `FnMut`: May mutate captured values, but does not move them out.
+- `FnOnce`: May move captured values out, consuming them.
+
+If the closure body were changed to call `drop(prefix)`, it would move the captured `String` out of the closure when invoked.
+
+Such a closure would implement only `FnOnce` and would no longer satisfy the `Fn` requirement of `call_twice`.
+
+**Sources:**
+- [`examples/move_closure_called_twice.rs`](examples/move_closure_called_twice.rs)
+
+**References:**
+- [Rust Reference — Closure call traits](https://doc.rust-lang.org/reference/types/closure.html#call-traits-and-coercions)
 
 ## Run the examples
 
@@ -278,7 +554,7 @@ Requires a stable Rust compiler with edition 2024 support (Rust 1.85+) and Bash.
 rustc --edition=2024 examples/wildcard_preserves_ownership.rs -o /tmp/wtf-rust-example
 /tmp/wtf-rust-example
 
-# Check all outputs and the intentional compile-fail example
+# Check all outputs and the intentional compile-fail examples
 bash scripts/verify.sh
 ```
 
@@ -288,6 +564,6 @@ Submissions should provide genuinely surprising **Rust-specific** behavior with 
 
 Avoid undefined behavior, compiler-specific accidents presented as language guarantees, and general programming surprises unrelated to Rust.
 
-## License
+## 🎓 License
 
 MIT. See [LICENSE](LICENSE).
